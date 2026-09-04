@@ -1,0 +1,353 @@
+name: RDP Windows VPS (Bore)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *' # Otomatis run ulang setiap 5 jam
+
+concurrency:
+  group: vps-bore-runner
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    timeout-minutes: 1440
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download and Extract Bore
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip" -OutFile bore.zip
+          Expand-Archive bore.zip -DestinationPath bore
+
+      - name: Enable RDP + Create Admin User
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          $pass = ConvertTo-SecureString "WindowsRDP2026@" -AsPlainText -Force
+          New-LocalUser "admin" -Password $pass -FullName "admin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin"
+          Add-LocalGroupMember -Group "Administrators" -Member "admin"
+
+      - name: Optimasi Registry 4K (Grafik Mulus)
+        run: |
+          $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force }
+          Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "MinFrameRate" -Value 120 -Type DWord
+
+      - name: Setup Auto Run auto.bat
+        shell: bash
+        run: |
+          mkdir -p "/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp"
+          cat << 'EOF' > "/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp/auto.bat"
+          @echo off
+          :: Memeriksa apakah script sudah berjalan sebagai Administrator
+          net session >nul 2>&1
+          if %errorLevel% == 0 (
+              goto :RunScript
+          ) else (
+              :: Jika belum, otomatis me-restart script ini dengan hak Administrator
+              powershell -Command "Start-Process -Verb RunAs -FilePath '%0'"
+              exit /b
+          )
+
+          :RunScript
+          echo ========================================================
+          echo MENGOPTIMALKAN WINDOWS UNTUK PERFORMA MAKSIMAL (ANTI-LAG)
+          echo ========================================================
+          echo.
+
+          :: Mematikan semua efek visual (Animasi, bayangan, dll)
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
+
+          :: Mematikan efek jendela saat digeser
+          reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f
+
+          :: Mematikan penghalus huruf (Font Smoothing) agar render teks lebih ringan
+          reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d 0 /f
+
+          :: Mematikan service background yang sering bikin disk usage 100%
+          net stop "SysMain" /y
+          sc config "SysMain" start=disabled
+
+          echo.
+          echo ========================================================
+          echo MENGINSTAL DAN MENGONFIGURASI FILEZILLA
+          echo ========================================================
+          echo.
+
+          echo Mengunduh FileZilla...
+          curl -L -o "%TEMP%\FileZilla_Setup.exe" "https://download.filezilla-project.org/client/FileZilla_3.70.6_win64_sponsored2-setup.exe"
+
+          echo Menginstal FileZilla (Silent Mode)...
+          start /wait "" "%TEMP%\FileZilla_Setup.exe" /S
+
+          echo Mengatur konfigurasi XML dan Layout FileZilla...
+          mkdir "%APPDATA%\FileZilla" 2>nul
+
+          (
+          echo ^<?xml version="1.0"?^>
+          echo ^<FileZilla3 version="3.70.6" platform="windows"^>
+          echo 	^<Settings^>
+          echo 		^<Setting name="Maximum simultaneous transfers"^>10^</Setting^>
+          echo 		^<Setting name="Use Pasv mode"^>1^</Setting^>
+          echo 		^<Setting name="Limit local ports"^>0^</Setting^>
+          echo 		^<Setting name="Limit ports low"^>6000^</Setting^>
+          echo 		^<Setting name="Limit ports high"^>7000^</Setting^>
+          echo 		^<Setting name="Limit ports offset"^>0^</Setting^>
+          echo 		^<Setting name="External IP mode"^>0^</Setting^>
+          echo 		^<Setting name="External IP" /^>
+          echo 		^<Setting name="External address resolver"^>http://ip.filezilla-project.org/ip.php^</Setting^>
+          echo 		^<Setting name="Last resolved IP" /^>
+          echo 		^<Setting name="No external ip on local conn"^>1^</Setting^>
+          echo 		^<Setting name="Pasv reply fallback mode"^>0^</Setting^>
+          echo 		^<Setting name="Timeout"^>20^</Setting^>
+          echo 		^<Setting name="Logging Debug Level"^>0^</Setting^>
+          echo 		^<Setting name="Logging Raw Listing"^>0^</Setting^>
+          echo 		^<Setting name="Allow transfermode fallback"^>1^</Setting^>
+          echo 		^<Setting name="Reconnect count"^>2^</Setting^>
+          echo 		^<Setting name="Reconnect delay"^>5^</Setting^>
+          echo 		^<Setting name="Enable speed limits"^>0^</Setting^>
+          echo 		^<Setting name="Speedlimit inbound"^>1000^</Setting^>
+          echo 		^<Setting name="Speedlimit outbound"^>100^</Setting^>
+          echo 		^<Setting name="Speedlimit burst tolerance"^>0^</Setting^>
+          echo 		^<Setting name="Preallocate space"^>0^</Setting^>
+          echo 		^<Setting name="View hidden files"^>0^</Setting^>
+          echo 		^<Setting name="Preserve timestamps"^>0^</Setting^>
+          echo 		^<Setting name="Socket recv buffer size (v2)"^>4194304^</Setting^>
+          echo 		^<Setting name="FTP Keep-alive commands"^>0^</Setting^>
+          echo 		^<Setting name="FTP Proxy type"^>0^</Setting^>
+          echo 		^<Setting name="FTP Proxy host" /^>
+          echo 		^<Setting name="FTP Proxy user" /^>
+          echo 		^<Setting name="FTP Proxy password" /^>
+          echo 		^<Setting name="FTP Proxy login sequence" /^>
+          echo 		^<Setting name="SFTP keyfiles" platform="win" /^>
+          echo 		^<Setting name="SFTP compression"^>0^</Setting^>
+          echo 		^<Setting name="Proxy type"^>0^</Setting^>
+          echo 		^<Setting name="Proxy host" /^>
+          echo 		^<Setting name="Proxy port"^>0^</Setting^>
+          echo 		^<Setting name="Proxy user" /^>
+          echo 		^<Setting name="Proxy password" /^>
+          echo 		^<Setting name="Logging file" platform="win" /^>
+          echo 		^<Setting name="Logging filesize limit"^>10^</Setting^>
+          echo 		^<Setting name="Size format"^>0^</Setting^>
+          echo 		^<Setting name="Size thousands separator"^>1^</Setting^>
+          echo 		^<Setting name="Size decimal places"^>1^</Setting^>
+          echo 		^<Setting name="TCP Keepalive Interval"^>15^</Setting^>
+          echo 		^<Setting name="Cache TTL"^>600^</Setting^>
+          echo 		^<Setting name="Minimum TLS Version"^>2^</Setting^>
+          echo 		^<Setting name="Directory listing item limit"^>10000000^</Setting^>
+          echo 		^<Setting name="Update Check Interval"^>7^</Setting^>
+          echo 		^<Setting name="Update Check Check Beta"^>0^</Setting^>
+          echo 		^<Setting name="Kiosk mode"^>0^</Setting^>
+          echo 		^<Setting name="Master password encryptor" /^>
+          echo 		^<Setting name="Trust system trust store"^>0^</Setting^>
+          echo 		^<Setting name="Ascii Binary mode"^>0^</Setting^>
+          echo 		^<Setting name="Auto Ascii files"^>ac^|am^|asp^|bat^|c^|cfm^|cgi^|conf^|cpp^|css^|dhtml^|diff^|diz^|h^|hpp^|htm^|html^|in^|inc^|java^|js^|jsp^|lua^|m4^|mak^|md5^|nfo^|nsh^|nsi^|pas^|patch^|pem^|php^|phtml^|pl^|po^|pot^|py^|qmail^|sh^|sha1^|sha256^|sha512^|shtml^|sql^|svg^|tcl^|tpl^|txt^|vbs^|xhtml^|xml^|xrc^</Setting^>
+          echo 		^<Setting name="Auto Ascii no extension"^>1^</Setting^>
+          echo 		^<Setting name="Auto Ascii dotfiles"^>1^</Setting^>
+          echo 		^<Setting name="Comparison threshold"^>1^</Setting^>
+          echo 		^<Setting name="Remote recursive operation list refresh"^>0^</Setting^>
+          echo 		^<Setting name="Cache directory" platform="win" /^>
+          echo 		^<Setting name="Language Code" /^>
+          echo 		^<Setting name="Concurrent download limit"^>0^</Setting^>
+          echo 		^<Setting name="Concurrent upload limit"^>0^</Setting^>
+          echo 		^<Setting name="Show debug menu"^>0^</Setting^>
+          echo 		^<Setting name="File exists action download"^>0^</Setting^>
+          echo 		^<Setting name="File exists action upload"^>0^</Setting^>
+          echo 		^<Setting name="Allow ascii resume"^>0^</Setting^>
+          echo 		^<Setting name="Greeting resources" /^>
+          echo 		^<Setting name="Onetime Dialogs" /^>
+          echo 		^<Setting name="Show Tree Local"^>1^</Setting^>
+          echo 		^<Setting name="Show Tree Remote"^>1^</Setting^>
+          echo 		^<Setting name="File Pane Layout"^>0^</Setting^>
+          echo 		^<Setting name="File Pane Swap"^>0^</Setting^>
+          echo 		^<Setting name="Filelist directory sort"^>0^</Setting^>
+          echo 		^<Setting name="Filelist name sort"^>0^</Setting^>
+          echo 		^<Setting name="Queue successful autoclear"^>0^</Setting^>
+          echo 		^<Setting name="Show message log"^>1^</Setting^>
+          echo 		^<Setting name="Show queue"^>1^</Setting^>
+          echo 		^<Setting name="Always use default editor"^>0^</Setting^>
+          echo 		^<Setting name="File associations (v2)" platform="win" /^>
+          echo 		^<Setting name="Comparison mode"^>1^</Setting^>
+          echo 		^<Setting name="Site Manager position" /^>
+          echo 		^<Setting name="Icon theme"^>default^</Setting^>
+          echo 		^<Setting name="Icon scale"^>125^</Setting^>
+          echo 		^<Setting name="Timestamp in message log"^>0^</Setting^>
+          echo 		^<Setting name="Sitemanager last selected" /^>
+          echo 		^<Setting name="Filelist status bar"^>1^</Setting^>
+          echo 		^<Setting name="Filter toggle state"^>0^</Setting^>
+          echo 		^<Setting name="Show quickconnect bar"^>1^</Setting^>
+          echo 		^<Setting name="Messagelog position"^>0^</Setting^>
+          echo 		^<Setting name="File doubleclick action"^>0^</Setting^>
+          echo 		^<Setting name="Dir doubleclick action"^>0^</Setting^>
+          echo 		^<Setting name="Minimize to tray"^>0^</Setting^>
+          echo 		^<Setting name="Search column widths" /^>
+          echo 		^<Setting name="Search column shown" /^>
+          echo 		^<Setting name="Search column order" /^>
+          echo 		^<Setting name="Search window size" /^>
+          echo 		^<Setting name="Comparison hide identical"^>0^</Setting^>
+          echo 		^<Setting name="Search sort order" /^>
+          echo 		^<Setting name="Edit track local"^>1^</Setting^>
+          echo 		^<Setting name="Prevent idle sleep"^>1^</Setting^>
+          echo 		^<Setting name="Filteredit window size" /^>
+          echo 		^<Setting name="Invalid char replace"^>_^</Setting^>
+          echo 		^<Setting name="Already connected choice"^>0^</Setting^>
+          echo 		^<Setting name="Edit status dialog size" /^>
+          echo 		^<Setting name="Display current speed"^>0^</Setting^>
+          echo 		^<Setting name="Toolbar hidden"^>0^</Setting^>
+          echo 		^<Setting name="Strip VMS revisions"^>0^</Setting^>
+          echo 		^<Setting name="Startup action"^>0^</Setting^>
+          echo 		^<Setting name="Persistent Choices"^>0^</Setting^>
+          echo 		^<Setting name="Queue completion action"^>1^</Setting^>
+          echo 		^<Setting name="Queue completion command" /^>
+          echo 		^<Setting name="Drag and Drop disabled"^>0^</Setting^>
+          echo 		^<Setting name="Disable update footer"^>0^</Setting^>
+          echo 		^<Setting name="Highest shown overlay id"^>0^</Setting^>
+          echo 		^<Setting name="Resolve local symlinks" platform="win"^>1^</Setting^>
+          echo 		^<Setting name="Last automatic update check"^>2026-08-01 16:10:56^</Setting^>
+          echo 		^<Setting name="Greeting version"^>3.70.6^</Setting^>
+          echo 		^<Setting name="Prompt password save"^>1^</Setting^>
+          echo 		^<Setting name="Last automatic update version"^>3.70.6^</Setting^>
+          echo 		^<Setting name="Update Check New Version" platform="win"^>nightly 2026-08-01 https://filezilla-project.org/nightlies/2026-08-01/win64/FileZilla_3_setup.exe 12770544 sha512 0bce4f0ffcd6607fb2dc8f980a3b8cc00943b95848551abd5c4e74095806607aaf87f907f4bd824110bed1a8a588d0cd4383bd7cb767dc587b7b94c8736c2a16 sig:qcw5bpsJovJwf6sLPDHtlPr2e2O6nK4+4EVnSWdPuSAnr8OGNORO3UnNpgQTd6y4Q3gt4eNfIj6beswQCq+ZCA
+          echo release 3.70.6 https://dl1.cdn.filezilla-project.org/FileZilla_3.70.6_win64-setup.exe 12726408 sha512 2fd8b5393a460e33ef4e1e83984189978f8f5d4d03d8e14f4dc99d28cdc9b33e7a19ec8885361392994239896327ab56d10a4b765d4fab6e4dede65efca37ec1 sig:lmW1AzRCV5gHztk9Xgl+v13ZwbHpJkL/IdH23IENXx5Oin1a4PuCYLSgNBNQQgrqoYl0//aYpNyRvKVrDp1qDg
+          echo ^</Setting^>
+          echo 		^<Setting name="Queue column widths"^>180 60 180 80 60 150^</Setting^>
+          echo 		^<Setting name="Local filelist colwidths"^>170 80 120 120^</Setting^>
+          echo 		^<Setting name="Remote filelist colwidths"^>150 75 80 100 80 85^</Setting^>
+          echo 		^<Setting name="Window position and size"^>0 360 41 1184 840 ^</Setting^>
+          echo 		^<Setting name="Local filelist shown columns"^>1111^</Setting^>
+          echo 		^<Setting name="Remote filelist shown columns"^>111111^</Setting^>
+          echo 		^<Setting name="Local filelist column order"^>0,1,2,3^</Setting^>
+          echo 		^<Setting name="Remote filelist column order"^>0,1,2,3,4,5^</Setting^>
+          echo 		^<Setting name="Local filelist sortorder"^>0 0^</Setting^>
+          echo 		^<Setting name="Remote filelist sortorder"^>0 0^</Setting^>
+          echo 		^<Setting name="Update Check"^>0^</Setting^>
+          echo 		^<Setting name="Number of Transfers"^>10^</Setting^>
+          echo 		^<Setting name="Time Format"^>0^</Setting^>
+          echo 		^<Setting name="Date Format"^>0^</Setting^>
+          echo 		^<Setting name="Default editor" platform="win"^>0^</Setting^>
+          echo 		^<Setting name="Splitter positions (v2)"^>97 -632 500000000 50 50 500000000^</Setting^>
+          echo 		^<Setting name="Tab data" sensitive="1"^>
+          echo 			^<Tabs^>
+          echo 				^<Tab selected="1"^>
+          echo 					^<Host /^>
+          echo 					^<Port^>21^</Port^>
+          echo 					^<Protocol^>-1^</Protocol^>
+          echo 					^<Logontype^>0^</Logontype^>
+          echo 					^<BypassProxy^>0^</BypassProxy^>
+          echo 					^<Site^>^</Site^>
+          echo 					^<RemotePath^>^</RemotePath^>
+          echo 					^<LocalPath^>C:\Users\admin\^</LocalPath^>
+          echo 				^</Tab^>
+          echo 			^</Tabs^>
+          echo 		^</Setting^>
+          echo 	^</Settings^>
+          echo ^</FileZilla3^>
+          ) > "%APPDATA%\FileZilla\filezilla.xml"
+
+          (
+          echo ^<?xml version="1.0"?^>
+          echo ^<FileZilla3 version="3.70.6" platform="windows"^>
+          echo 	^<Layout Builddate="2026-06-04" Buildtime="14:53:46"^>
+          echo 		^<Resources /^>
+          echo 		^<Language id="en_US" date="1780584876"^>
+          echo 			^<Font font="1;9;-12;0;0;0;400;0;0;0;1;0;0;5;0;Segoe UI" width="669" height="15" /^>
+          echo 			^<Dialog name="Settings" width="449" /^>
+          echo 		^</Language^>
+          echo 	^</Layout^>
+          echo ^</FileZilla3^>
+          ) > "%APPDATA%\FileZilla\layout.xml"
+
+          echo Mengunduh AutoDownloader.exe...
+          curl -L -o "%USERPROFILE%\Desktop\AutoDownloader.exe" "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
+
+          echo.
+          echo ========================================================
+          echo MEMBUAT SHORTCUT CHROME KHUSUS (INCOGNITO + ADOBE STOCK)
+          echo ========================================================
+          :: Setup variabel Environment untuk URL agar mudah dibaca oleh PowerShell dan menghindari masalah escape karakter
+          set "ADOBE_URL=https://auth.services.adobe.com/en_US/index.html?callback=https%%3A%%2F%%2Fims-na1.adobelogin.com%%2Fims%%2Fadobeid%%2FAdobeStockContributor1%%2FAdobeID%%2Fcode%%3Fredirect_uri%%3Dhttps%%253A%%252F%%252Fcontributor.stock.adobe.com%%252F%%253Fisa0%%253D1%%26code_challenge_method%%3Dplain%%26use_ms_for_expiry%%3Dtrue&client_id=AdobeStockContributor1&scope=AdobeID%%2Copenid%%2Ccreative_cloud%%2Ccreative_sdk%%2Ccc_private%%2Cgnav%%2Csao.stock%%2Cadditional_info.address.mail_to%%2Cadditional_info.roles%%2Cread_organizations%%2Cread_pc.stock%%2Csao.cce_private%%2Cpps.read%%2Csecurity_phone.status.r%%2Cportfolio.sdk.import&relay=681b1aaa-4524-429d-a843-bd82c376f9b6&locale=en_US&flow_type=code&dctx_id=v%%3A2%%2Cs%%2Cad62dff0-679d-11f0-ae3d-0773325bce27&idp_flow_type=login&ab_test=welcome-back&s_p=google%%2Cfacebook&response_type=code&code_challenge_method=plain&redirect_uri=https%%3A%%2F%%2Fcontributor.stock.adobe.com%%2F%%3Fisa0%%3D1&use_ms_for_expiry=true#/"
+          set "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe"
+          set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Adobe Stock.lnk"
+
+          :: Mengeksekusi PowerShell untuk menyusun shortcut di Desktop
+          powershell -Command "$wshell = New-Object -ComObject WScript.Shell; $shortcut = $wshell.CreateShortcut($env:SHORTCUT_PATH); $shortcut.TargetPath = $env:CHROME_PATH; $clean_url = $env:ADOBE_URL -replace '%%%%', '%%'; $shortcut.Arguments = \"--incognito `\"$clean_url`\"\"; $shortcut.Save()"
+
+          echo.
+          echo ========================================================
+          echo PROSES SELESAI!
+          echo ========================================================
+          echo RDP telah dioptimalkan (restart RDP agar efek maksimal).
+          echo Membuka FileZilla dan Chrome dengan perbaikan Drag and Drop...
+
+          :: MEMPERBAIKI BUG DRAG & DROP:
+          explorer.exe "C:\Program Files\FileZilla FTP Client\filezilla.exe"
+          explorer.exe "%USERPROFILE%\Desktop\Adobe Stock.lnk"
+          
+          :: Hapus otomatis script auto.bat agar tidak berulang saat login berikutnya
+          del "%~f0"
+          exit
+          EOF
+
+      - name: Monitor Bore Stream & Force Update File
+        run: |
+          $PASS = "WindowsRDP2026@"
+          $USER = "admin"
+          $lastFullAddress = ""
+
+          git config --global user.name "Bot-RDP"
+          git config --global user.email "bot@github.com"
+          git config --global core.autocrlf false
+
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = ".\bore\bore.exe"
+          $psi.Arguments = "local 3389 --to bore.pub"
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $process = [System.Diagnostics.Process]::Start($psi)
+
+          while (!$process.HasExited) {
+              $line = $process.StandardOutput.ReadLine()
+              if ($line -match "(?:listening at|remote forwarding at) (bore\.pub:\d+)") {
+                  $fullAddress = $matches[1]
+                  $portOnly = $fullAddress.Split(':')[1]
+
+                  if ($fullAddress -ne $lastFullAddress) {
+                      $lastFullAddress = $fullAddress
+                      
+                      if (Test-Path "rdp_info.txt") { Remove-Item "rdp_info.txt" -Force }
+
+                      $createdAt = (Get-Date).ToString('HH:mm:ss dd/MM/yyyy')
+                      $reportLines = @(
+                        '=======================================================',
+                        'RDP INFO - Amir Edition',
+                        '=======================================================',
+                        "FULL ADDRESS   : bore.pub:$portOnly",
+                        "PORT           : $portOnly",
+                        'HOST           : bore.pub',
+                        '-------------------------------------------------------',
+                        "Username       : $USER",
+                        "Password       : $PASS",
+                        "Created        : $createdAt",
+                        '======================================================='
+                      )
+                      $report = ($reportLines -join "`r`n")
+                      [System.IO.File]::WriteAllText("$(Get-Location)\rdp_info.txt", $report)
+                      
+                      git checkout main
+                      git add rdp_info.txt
+                      git commit -m "Update RDP Info [skip ci]"
+                      git push origin main --force
+                  }
+              }
+              Start-Sleep -Milliseconds 200
+          }
