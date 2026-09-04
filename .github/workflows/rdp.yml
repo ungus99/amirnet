@@ -13,14 +13,21 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     timeout-minutes: 1440
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      - name: Optimasi Performa & Anti-Crash
+        run: |
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          Get-Process -Name "Runner.Listener", "Runner.Worker" -ErrorAction SilentlyContinue | ForEach-Object {
+              $_.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+          }
 
       - name: Download and Extract Bore
         run: |
@@ -28,10 +35,12 @@ jobs:
           Expand-Archive bore.zip -DestinationPath bore
 
       - name: Enable RDP + Create Admin User
+        env:
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          $pass = ConvertTo-SecureString "WindowsRDP2026@" -AsPlainText -Force
+          $pass = ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force
           New-LocalUser "admin" -Password $pass -FullName "admin"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin"
           Add-LocalGroupMember -Group "Administrators" -Member "admin"
@@ -287,67 +296,67 @@ jobs:
           echo PROSES SELESAI!
           echo ========================================================
           echo RDP telah dioptimalkan (restart RDP agar efek maksimal).
-          echo Membuka FileZilla dan Chrome dengan perbaikan Drag and Drop...
+          echo Membuka FileZilla, Chrome, dan AutoDownloader...
 
-          :: MEMPERBAIKI BUG DRAG & DROP:
+          :: MEMPERBAIKI BUG DRAG & DROP & BUKA SEMUA APLIKASI
           explorer.exe "C:\Program Files\FileZilla FTP Client\filezilla.exe"
           explorer.exe "%USERPROFILE%\Desktop\Adobe Stock.lnk"
+          start "" "%USERPROFILE%\Desktop\AutoDownloader.exe"
           
           :: Hapus otomatis script auto.bat agar tidak berulang saat login berikutnya
           del "%~f0"
           exit
           EOF
 
-      - name: Monitor Bore Stream & Force Update File
+      - name: Monitor Bore Stream & Self-Healing Watchdog
+        env:
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
+          SCRIPT_SECRET: ${{ secrets.SCRIPT_SECRET }}
         run: |
-          $PASS = "WindowsRDP2026@"
           $USER = "admin"
           $lastFullAddress = ""
 
-          git config --global user.name "Bot-RDP"
-          git config --global user.email "bot@github.com"
-          git config --global core.autocrlf false
+          while ($true) {
+              Write-Host "Memulai tunnel Bore..."
+              $psi = New-Object System.Diagnostics.ProcessStartInfo
+              $psi.FileName = ".\bore\bore.exe"
+              $psi.Arguments = "local 3389 --to bore.pub"
+              $psi.UseShellExecute = $false
+              $psi.RedirectStandardOutput = $true
+              $psi.RedirectStandardError = $true
+              $process = [System.Diagnostics.Process]::Start($psi)
 
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = ".\bore\bore.exe"
-          $psi.Arguments = "local 3389 --to bore.pub"
-          $psi.UseShellExecute = $false
-          $psi.RedirectStandardOutput = $true
-          $process = [System.Diagnostics.Process]::Start($psi)
+              while (!$process.HasExited) {
+                  $line = $process.StandardOutput.ReadLine()
+                  if ($line -match "(?:listening at|remote forwarding at) (bore\.pub:\d+)") {
+                      $fullAddress = $matches[1]
+                      $portOnly = $fullAddress.Split(':')[1]
 
-          while (!$process.HasExited) {
-              $line = $process.StandardOutput.ReadLine()
-              if ($line -match "(?:listening at|remote forwarding at) (bore\.pub:\d+)") {
-                  $fullAddress = $matches[1]
-                  $portOnly = $fullAddress.Split(':')[1]
+                      if ($fullAddress -ne $lastFullAddress) {
+                          $lastFullAddress = $fullAddress
+                          Write-Host "Koneksi aktif: $fullAddress - Mengirim ke Spreadsheet..."
+                          
+                          $payload = @{
+                              secret = "$env:SCRIPT_SECRET"
+                              host = "bore.pub"
+                              port = "$portOnly"
+                              full_address = "bore.pub:$portOnly"
+                              username = "$USER"
+                              password = "$env:RDP_PASS"
+                          } | ConvertTo-Json
 
-                  if ($fullAddress -ne $lastFullAddress) {
-                      $lastFullAddress = $fullAddress
-                      
-                      if (Test-Path "rdp_info.txt") { Remove-Item "rdp_info.txt" -Force }
-
-                      $createdAt = (Get-Date).ToString('HH:mm:ss dd/MM/yyyy')
-                      $reportLines = @(
-                        '=======================================================',
-                        'RDP INFO - Amir Edition',
-                        '=======================================================',
-                        "FULL ADDRESS   : bore.pub:$portOnly",
-                        "PORT           : $portOnly",
-                        'HOST           : bore.pub',
-                        '-------------------------------------------------------',
-                        "Username       : $USER",
-                        "Password       : $PASS",
-                        "Created        : $createdAt",
-                        '======================================================='
-                      )
-                      $report = ($reportLines -join "`r`n")
-                      [System.IO.File]::WriteAllText("$(Get-Location)\rdp_info.txt", $report)
-                      
-                      git checkout main
-                      git add rdp_info.txt
-                      git commit -m "Update RDP Info [skip ci]"
-                      git push origin main --force
+                          try {
+                              $response = Invoke-RestMethod -Uri "$env:SCRIPT_URL" -Method Post -Body $payload -ContentType "application/json"
+                              Write-Host "SUKSES: Data tersimpan di Google Sheets!"
+                          } catch {
+                              Write-Host "Gagal kirim ke Google Sheets: $_"
+                          }
+                      }
                   }
+                  Start-Sleep -Milliseconds 200
               }
-              Start-Sleep -Milliseconds 200
+
+              Write-Host "Peringatan: Koneksi Bore terputus. Menghubungkan ulang dalam 5 detik..."
+              Start-Sleep -Seconds 5
           }
