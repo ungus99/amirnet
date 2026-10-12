@@ -1,0 +1,33 @@
+name: Bersihkan Semua History (Super Fast)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  del_runs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Hapus Semua Run Secara Paralel (Turbo)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Mengambil semua riwayat run..."
+          
+          # Mengambil SEMUA ID run yang sudah selesai (otomatis memuat semua halaman)
+          RUNS=$(gh api "repos/$REPO/actions/runs?per_page=100" --paginate -q '.workflow_runs[] | select(.status == "completed") | .id')
+
+          if [ -z "$RUNS" ]; then
+            echo "Semua riwayat sudah bersih!"
+            exit 0
+          fi
+
+          TOTAL=$(echo "$RUNS" | wc -l)
+          echo "Ditemukan $TOTAL riwayat. Menghapus 25 run sekaligus bersamaan..."
+
+          # Menghapus secara paralel dengan 25 jalur sekaligus (-P 25)
+          echo "$RUNS" | xargs -I {} -P 25 gh api --silent --method DELETE "repos/$REPO/actions/runs/{}"
+
+          echo "Pembersihan selesai! Semua riwayat lama berhasil dilibas total."
